@@ -1,0 +1,382 @@
+---
+alwaysApply: false
+---
+# IQStocker v2.0 - Database Schema
+
+## Models Overview (9 tables)
+
+1. **users** - User accounts
+2. **limits** - Usage limits per user
+3. **csv_analyses** - Uploaded CSV files
+4. **analytics_reports** - Generated reports
+5. **theme_requests** - Theme history
+6. **referrals** - Referral relationships
+7. **payments** - Payment transactions
+8. **system_messages** - System notifications
+9. **broadcast_messages** - Mass broadcasts
+
+## Detailed Schemas
+
+### 1. User (users)
+```python
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+    
+    # Primary key
+    id: int | None = Field(default=None, primary_key=True)
+    
+    # Telegram info
+    telegram_id: int = Field(unique=True, index=True)
+    username: str | None = Field(default=None, max_length=255)
+    
+    # Subscription
+    subscription_tier: SubscriptionTier = Field(default=SubscriptionTier.FREE)
+    subscription_expires_at: datetime | None = Field(default=None)
+    
+    # Referral
+    referrer_id: int | None = Field(default=None, foreign_key="users.id")
+    
+    # IQ Points (from referral program)
+    iq_points: int = Field(default=0)
+    
+    # Status
+    is_banned: bool = Field(default=False)
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**Indexes**:
+- `telegram_id` (unique, indexed)
+- `(subscription_tier, subscription_expires_at)` (composite, for active subscriptions)
+- `referrer_id` (for referral queries)
+- `created_at` (for statistics)
+
+**Business Rules**:
+- `telegram_id` must be unique
+- `subscription_expires_at` NULL = lifetime/no expiry
+- `referrer_id` self-reference for referral tree
+
+### 2. Limits (limits)
+```python
+class Limits(SQLModel, table=True):
+    __tablename__ = "limits"
+    
+    user_id: int = Field(primary_key=True, foreign_key="users.id")
+    
+    # Analytics limits
+    analytics_used: int = Field(default=0)
+    analytics_limit: int = Field(default=5)  # FREE: 5, PRO: -1 (unlimited)
+    
+    # Theme limits
+    themes_used: int = Field(default=0)
+    themes_limit: int = Field(default=10)  # FREE: 10, PRO: 100, ULTRA: -1
+    
+    # Reset timing
+    reset_at: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(days=30))
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**Business Rules**:
+- `-1` means unlimited
+- Reset every 30 days (monthly cycle)
+- Update limits when subscription changes
+
+**Limits by Tier**:
+- FREE: analytics=5, themes=10
+- PRO: analytics=-1, themes=100
+- ULTRA: analytics=-1, themes=-1
+
+### 3. CSVAnalysis (csv_analyses)
+```python
+class CSVAnalysis(SQLModel, table=True):
+    __tablename__ = "csv_analyses"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    
+    # File info
+    file_id: str = Field(max_length=255)  # Telegram file_id
+    filename: str = Field(max_length=255)
+    row_count: int
+    
+    # Processing status
+    analysis_status: AnalysisStatus = Field(default=AnalysisStatus.PENDING)
+    error_message: str | None = Field(default=None)
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**Indexes**:
+- `user_id` (for user's CSV history)
+- `created_at` (for chronological queries)
+
+**Status Flow**:
+PENDING → PROCESSING → COMPLETED (or FAILED)
+
+### 4. AnalyticsReport (analytics_reports)
+```python
+class AnalyticsReport(SQLModel, table=True):
+    __tablename__ = "analytics_reports"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    csv_analysis_id: int = Field(foreign_key="csv_analyses.id", unique=True)
+    
+    # Report data
+    kpi_data: dict = Field(sa_column=Column(JSON))
+    summary_text: str = Field(sa_column=Column(Text))
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**kpi_data JSON structure**:
+```json
+{
+  "total_sales": 1234,
+  "total_revenue": 567.89,
+  "total_impressions": 45000,
+  "cpm": 12.63,
+  "conversion_rate": 2.74,
+  "average_check": 0.46,
+  "trend": "growing",
+  "trend_percentage": 15.3,
+  "top_assets": [
+    {"asset_id": "123", "title": "...", "sales": 50, "revenue": 25.0},
+    ...
+  ],
+  "type_distribution": {
+    "photo": {"count": 800, "revenue": 350.0},
+    "vector": {"count": 434, "revenue": 217.89}
+  }
+}
+```
+
+### 5. ThemeRequest (theme_requests)
+```python
+class ThemeRequest(SQLModel, table=True):
+    __tablename__ = "theme_requests"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    
+    theme: str = Field(sa_column=Column(Text))
+    category: str = Field(max_length=50)  # "vectors", "photos", "videos", "audio", "templates"
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+```
+
+**Categories**:
+- `vectors` - Vector illustrations
+- `photos` - Photography
+- `videos` - Video clips
+- `audio` - Audio tracks
+- `templates` - Design templates
+
+### 6. Referral (referrals)
+```python
+class Referral(SQLModel, table=True):
+    __tablename__ = "referrals"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    
+    referrer_id: int = Field(foreign_key="users.id", index=True)
+    referred_id: int = Field(foreign_key="users.id", unique=True)
+    
+    # Subscription tier when referral was made (PRO or ULTRA)
+    subscription_tier: SubscriptionTier
+    
+    # IQ Points awarded (always 1 point per referral purchase)
+    iq_points_awarded: int = Field(default=1)
+    
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**Business Rules**:
+- `referred_id` is unique (user can only be referred once)
+- Points are awarded only when referred user purchases PRO or ULTRA subscription
+- Each successful referral purchase = +1 IQ Point to referrer
+- Points are stored in User table (`iq_points` field)
+
+### 7. Payment (payments)
+```python
+class Payment(SQLModel, table=True):
+    __tablename__ = "payments"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    
+    # Tribute.tg info
+    tribute_transaction_id: str = Field(unique=True, max_length=255)
+    
+    # Amount
+    amount: int  # В копейках (30000 = 300 RUB)
+    currency: str = Field(default="RUB", max_length=3)
+    
+    # Status
+    status: PaymentStatus = Field(default=PaymentStatus.PENDING)
+    
+    # Subscription details
+    subscription_tier: SubscriptionTier
+    subscription_days: int = Field(default=30)
+    
+    # Provider
+    payment_provider: PaymentProvider = Field(default=PaymentProvider.TRIBUTE)
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    completed_at: datetime | None = Field(default=None)
+```
+
+**Status Flow**:
+PENDING → COMPLETED (or FAILED or REFUNDED)
+
+**Prices**:
+- PRO: 30000 kopecks (300 RUB) / 30 days
+- ULTRA: 60000 kopecks (600 RUB) / 30 days
+
+### 8. SystemMessage (system_messages)
+```python
+class SystemMessage(SQLModel, table=True):
+    __tablename__ = "system_messages"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    
+    message_type: MessageType = Field(default=MessageType.INFO)
+    priority: MessagePriority = Field(default=MessagePriority.NORMAL)
+    
+    title: str = Field(max_length=255)
+    content: str = Field(sa_column=Column(Text))
+    
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**Message Types**:
+- INFO: General information
+- WARNING: Important notices
+- PROMO: Promotional messages
+
+**Priorities**:
+- LOW: Can be ignored
+- NORMAL: Regular importance
+- HIGH: Should be read
+- URGENT: Critical, must read
+
+### 9. BroadcastMessage (broadcast_messages)
+```python
+class BroadcastMessage(SQLModel, table=True):
+    __tablename__ = "broadcast_messages"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    admin_id: int = Field(foreign_key="users.id")
+    
+    # Content
+    message_text: str = Field(sa_column=Column(Text))
+    target_subscription: SubscriptionTier | None = Field(default=None)  # NULL = all users
+    
+    # Status
+    status: BroadcastStatus = Field(default=BroadcastStatus.DRAFT)
+    sent_count: int = Field(default=0)
+    error_count: int = Field(default=0)
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
+```
+
+## Enums
+
+### SubscriptionTier
+```python
+class SubscriptionTier(str, Enum):
+    FREE = "free"
+    PRO = "pro"
+    ULTRA = "ultra"
+    TEST_PRO = "test_pro"  # For testing
+```
+
+### AnalysisStatus
+```python
+class AnalysisStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+```
+
+### PaymentStatus
+```python
+class PaymentStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+```
+
+### PaymentProvider
+```python
+class PaymentProvider(str, Enum):
+    TRIBUTE = "tribute"
+```
+
+### BroadcastStatus
+```python
+class BroadcastStatus(str, Enum):
+    DRAFT = "draft"
+    SCHEDULED = "scheduled"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+```
+
+### MessageType
+```python
+class MessageType(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    PROMO = "promo"
+```
+
+### MessagePriority
+```python
+class MessagePriority(str, Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+```
+
+## Common Query Patterns
+
+### Get active subscriptions:
+```python
+select(User).where(
+    User.subscription_tier != SubscriptionTier.FREE,
+    User.subscription_expires_at > datetime.utcnow()
+)
+```
+
+### Get user with limits:
+```python
+select(User).options(selectinload(User.limits)).where(User.telegram_id == telegram_id)
+```
+
+### Get referrals by user:
+```python
+select(Referral).where(Referral.referrer_id == user_id).order_by(Referral.created_at.desc())
+```
+
+### Get user IQ points:
+```python
+select(User.iq_points).where(User.id == user_id)
+```
+
+### Get payment history:
+```python
+select(Payment).where(
+    Payment.user_id == user_id,
+    Payment.status == PaymentStatus.COMPLETED
+).order_by(Payment.created_at.desc())
+```

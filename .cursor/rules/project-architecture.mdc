@@ -1,0 +1,198 @@
+---
+alwaysApply: false
+---
+
+# IQStocker v2.0 - Project Architecture
+
+## Overview
+Telegram bot for Adobe Stock portfolio analytics with subscription management, referral system, and payment integration.
+
+## Tech Stack
+- **Bot Framework**: Aiogram 3.4+ (async)
+- **Web Framework**: FastAPI 0.109+ (admin panel, webhooks)
+- **ORM**: SQLModel 0.0.16+ (unified Pydantic + SQLAlchemy)
+- **Database**: PostgreSQL 16
+- **Cache**: Redis 7.2
+- **Task Queue**: ARQ 0.26+ (async background jobs)
+- **Migrations**: Alembic
+- **Deployment**: Docker + Railway.app
+
+## Layered Architecture (STRICT)
+
+### Layer 1: Handlers (UI Layer)
+**Location**: `src/bot/handlers/`
+**Responsibility**: Telegram UI only
+- Receive aiogram events
+- Call services (NEVER repositories directly)
+- Send responses using LEXICON_RU texts
+- Manage FSM state transitions
+
+**Example**:
+```python
+@router.message(Command("start"))
+async def start_handler(message: Message, session: AsyncSession):
+    user = await user_service.get_or_create(session, message.from_user.id)
+    await message.answer(LEXICON_RU["start"].format(username=user.username))
+```
+
+### Layer 2: Services (Business Logic Layer)
+**Location**: `src/services/`
+**Responsibility**: ALL business logic
+- Validate input data
+- Enforce business rules (limits, subscriptions)
+- Orchestrate multiple repositories
+- Manage complex transactions
+- Calculate KPIs, bonuses, etc.
+
+**Example**:
+```python
+class UserService:
+    async def register_user(self, session: AsyncSession, telegram_id: int, referrer_id: int | None) -> User:
+        # 1. Create user
+        user = await self.user_repo.create(session, {...})
+        # 2. Create limits
+        await self.limits_repo.create_default(session, user.id)
+        # 3. Process referral
+        if referrer_id:
+            await self.referral_service.track_chain(session, user.id, referrer_id)
+        return user
+```
+
+### Layer 3: Repositories (Data Access Layer)
+**Location**: `src/database/repositories/`
+**Responsibility**: Data access ONLY
+- CRUD operations
+- Database queries
+- Return SQLModel objects
+- NO business logic
+
+**Example**:
+```python
+class UserRepository(BaseRepository[User]):
+    async def get_by_telegram_id(self, session: AsyncSession, telegram_id: int) -> User | None:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        return result.scalar_one_or_none()
+```
+
+### Layer 4: Models (Data Layer)
+**Location**: `src/database/models.py`
+**Responsibility**: Data schemas
+- SQLModel table definitions
+- Enums
+- Field constraints
+- NO methods with business logic
+
+## Project Structure
+```
+src/
+├── bot/
+│   ├── handlers/         # UI logic (12 files)
+│   ├── keyboards/        # Telegram keyboards
+│   ├── states/           # FSM states
+│   ├── lexicon/          # All texts (lexicon_ru.py)
+│   └── main.py           # Bot entry point
+├── admin/
+│   ├── views/            # FastAPI CRUD views
+│   ├── templates/        # Jinja2 templates
+│   └── main.py           # Admin panel app
+├── api/
+│   ├── health.py         # Health checks
+│   └── webhooks.py       # Tribute.tg webhook
+├── database/
+│   ├── repositories/     # 8 repositories
+│   ├── models.py         # 9 SQLModel models
+│   └── connection.py     # Async engine
+├── services/             # 7 service classes
+├── workers/
+│   └── main.py           # ARQ background tasks
+├── core/
+│   ├── analytics/        # CSV processing
+│   └── utils/            # Helpers
+└── config/
+    ├── settings.py       # Pydantic Settings
+    └── logging.py        # Structlog config
+```
+
+## Key Design Patterns
+
+### 1. Repository Pattern
+- Generic `BaseRepository[T]` for CRUD
+- Type-safe operations
+- Easy mocking for tests
+
+### 2. Service Layer Pattern
+- Dependency injection of repositories
+- Transaction management
+- Business rule enforcement
+
+### 3. Dependency Injection
+- Services receive repositories in __init__
+- Handlers receive services via DI
+- Sessions injected via FastAPI Depends()
+
+### 4. Factory Pattern
+- Callback data factories for keyboards
+- Session factory for database
+
+## Data Flow Examples
+
+### User Registration Flow:
+```
+Handler (start.py)
+    ↓
+UserService.register_user()
+    ↓ uses
+UserRepository.create() + LimitsRepository.create() + ReferralService.track_chain()
+    ↓ returns
+User object
+    ↓
+Handler sends LEXICON_RU["start_registered"]
+```
+
+### CSV Analysis Flow:
+```
+Handler (analytics.py) receives file
+    ↓
+AnalyticsService.create_analysis() - saves to DB
+    ↓
+ARQ enqueue_job("process_csv", csv_id)
+    ↓ async worker
+Worker downloads file → parse_csv() → calculate_kpi() → save report
+    ↓
+Bot.send_message() with results
+```
+
+### Payment Flow:
+```
+User clicks "Buy PRO"
+    ↓
+PaymentService.create_payment_link() - calls Tribute API
+    ↓
+Bot sends payment URL
+    ↓ user pays
+Tribute webhook → /api/webhooks/tribute
+    ↓
+PaymentService.complete_payment() + UserService.activate_subscription()
+    ↓
+Bot notifies user
+```
+
+## Environment Configuration
+
+All configs via Pydantic Settings:
+- `BotSettings` - BOT_TOKEN, ADMIN_IDS
+- `DatabaseSettings` - DATABASE_URL
+- `RedisSettings` - REDIS_HOST, REDIS_PORT
+- `TributeSettings` - API keys, webhook secret
+- `AdminSettings` - Admin panel credentials
+
+Load from `.env` file automatically.
+
+## Important Rules
+
+1. **NEVER bypass layers** - Handler → Service → Repository
+2. **NEVER put business logic in repositories**
+3. **ALWAYS use LEXICON_RU for texts**
+4. **ALWAYS use async/await for I/O**
+5. **ALWAYS use type hints**
+6. **ALWAYS log with structlog**

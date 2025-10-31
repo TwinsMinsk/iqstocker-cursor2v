@@ -1,0 +1,352 @@
+---
+alwaysApply: false
+---
+
+# Deployment Guide - IQStocker v2.0
+
+## Railway.app Deployment
+
+### Project Setup
+
+#### 1. Railway CLI Installation
+```bash
+# MacOS/Linux
+curl -fsSL https://railway.app/install.sh | sh
+
+# Windows
+iwr https://railway.app/install.ps1 | iex
+
+# Login
+railway login
+```
+
+#### 2. Project Initialization
+```bash
+cd iqstocker-v2
+railway init
+railway link
+```
+
+## ENV Variables (.env.example)
+
+### Complete List
+```bash
+# BOT CONFIGURATION
+BOT_TOKEN=your_telegram_bot_token_here
+ADMIN_IDS=123456789,987654321
+
+# DATABASE
+DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/dbname
+
+# REDIS
+REDIS_URL=redis://default:pass@host:6379
+
+# TRIBUTE.TG PAYMENT
+TRIBUTE_API_KEY=your_tribute_api_key_here
+TRIBUTE_WEBHOOK_SECRET=your_webhook_secret_here
+TRIBUTE_BASE_URL=https://api.tribute.tg
+
+# ADMIN PANEL
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change_me_in_production
+SECRET_KEY=generate_random_secret_key_here  # openssl rand -hex 32
+
+# APPLICATION
+ENV=production  # development | production
+LOG_LEVEL=INFO  # DEBUG | INFO | WARNING | ERROR
+TIMEZONE=Europe/Moscow
+
+# RATE LIMITING
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_REQUESTS=30
+RATE_LIMIT_PERIOD=60  # seconds
+
+# CSV ANALYSIS
+MAX_CSV_SIZE_MB=10
+MAX_CSV_ROWS=10000
+ALLOWED_CSV_EXTENSIONS=.csv,.tsv
+
+# REFERRAL PROGRAM (IQ Points System)
+# Points are awarded when referred user purchases PRO or ULTRA subscription
+REFERRAL_IQ_POINTS_PER_PURCHASE=1
+
+# SUBSCRIPTION PRICES (in rubles)
+PRO_PRICE_7_DAYS=99
+PRO_PRICE_30_DAYS=299
+PRO_PRICE_90_DAYS=799
+ULTRA_PRICE_30_DAYS=599
+ULTRA_PRICE_90_DAYS=1499
+
+# EXTERNAL SERVICES (optional)
+SENTRY_DSN=  # For error tracking
+GRAFANA_URL=  # For monitoring
+```
+
+## Railway Services Configuration
+
+### 1. PostgreSQL Setup
+```bash
+railway add --database postgresql
+railway run alembic upgrade head
+```
+
+### 2. Redis Setup
+```bash
+railway add --database redis
+```
+
+### 3. Bot Service (Dockerfile.bot)
+```yaml
+# railway.toml
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.bot"
+
+[deploy]
+startCommand = "python -m src.bot.main"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[[deploy.healthcheck]]
+httpPath = "/health"
+interval = 30
+timeout = 10
+```
+
+### 4. Admin Service (Dockerfile.admin)
+```yaml
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.admin"
+
+[deploy]
+startCommand = "uvicorn src.admin.main:app --host 0.0.0.0 --port $PORT"
+
+[[deploy.healthcheck]]
+httpPath = "/health"
+interval = 30
+timeout = 10
+```
+
+### 5. Worker Service (Dockerfile.worker)
+```yaml
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.worker"
+
+[deploy]
+startCommand = "python -m arq src.worker.tasks.WorkerSettings"
+restartPolicyType = "always"
+```
+
+## Docker Commands
+
+### Local Development
+```bash
+# Build all services
+docker-compose build
+
+# Run
+docker-compose up -d
+
+# Logs
+docker-compose logs -f bot
+docker-compose logs -f admin
+docker-compose logs -f worker
+
+# Stop
+docker-compose down
+
+# Rebuild
+docker-compose up -d --build
+```
+
+### Production Build
+```bash
+# Bot
+docker build -f Dockerfile.bot -t iqstocker-bot:latest .
+
+# Admin
+docker build -f Dockerfile.admin -t iqstocker-admin:latest .
+
+# Worker
+docker build -f Dockerfile.worker -t iqstocker-worker:latest .
+```
+
+## Database Migrations (Alembic)
+
+### Creating Migrations
+```bash
+# Automatic migration
+alembic revision --autogenerate -m "Initial migration"
+
+# Manual migration
+alembic revision -m "Add new column"
+```
+
+### Applying Migrations
+```bash
+# Locally
+alembic upgrade head
+
+# On Railway
+railway run alembic upgrade head
+
+# Rollback
+alembic downgrade -1
+```
+
+## Railway Deployment Steps
+
+### Step-by-Step Deploy
+
+#### Step 1: Preparation
+```bash
+# Code check
+poetry run ruff check src/
+poetry run mypy src/
+
+# Tests
+poetry run pytest --cov=src
+```
+
+#### Step 2: Create Project
+```bash
+railway init
+railway link <project-id>
+```
+
+#### Step 3: Add Databases
+```bash
+railway add --database postgresql
+railway add --database redis
+```
+
+#### Step 4: Configure ENV
+```bash
+railway variables set BOT_TOKEN="your_token"
+railway variables set ADMIN_IDS="123456789"
+railway variables set TRIBUTE_API_KEY="your_key"
+# ... other variables
+```
+
+#### Step 5: Deploy Services
+```bash
+# Bot service
+railway up --service bot
+
+# Admin service
+railway up --service admin
+
+# Worker service
+railway up --service worker
+```
+
+#### Step 6: Migrations
+```bash
+railway run --service bot alembic upgrade head
+```
+
+#### Step 7: Verification
+```bash
+# Logs
+railway logs --service bot
+
+# Status
+railway status
+```
+
+## Health Checks
+
+### Bot Health Check
+```python
+# src/bot/health.py
+from aiogram import Bot
+from src.core.config import settings
+
+async def check_bot_health() -> dict:
+    try:
+        bot = Bot(token=settings.BOT_TOKEN)
+        me = await bot.get_me()
+        await bot.session.close()
+        
+        return {
+            "status": "healthy",
+            "bot_username": me.username,
+            "bot_id": me.id
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+```
+
+### Admin Health Check
+```python
+# src/admin/health.py
+from fastapi import APIRouter
+from sqlmodel import select
+from src.core.database import get_session
+
+router = APIRouter()
+
+@router.get("/health")
+async def health_check():
+    try:
+        async with get_session() as session:
+            await session.exec(select(1))
+        
+        return {
+            "status": "healthy",
+            "service": "admin",
+            "database": "connected"
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+```
+
+## Rollback Strategy
+
+### Railway Rollback
+```bash
+# List deployments
+railway deployments
+
+# Rollback to previous
+railway rollback <deployment-id>
+```
+
+### Database Rollback
+```bash
+# Rollback last migration
+railway run alembic downgrade -1
+
+# Rollback to specific version
+railway run alembic downgrade <revision>
+```
+
+### Emergency Stop
+```bash
+# Stop service
+railway down --service bot
+
+# Remove deployment
+railway deployments remove <deployment-id>
+```
+
+## Security Checklist
+
+- [ ] All secrets in ENV variables (not in code)
+- [ ] ADMIN_PASSWORD changed from default
+- [ ] SECRET_KEY generated randomly (32+ characters)
+- [ ] HTTPS for admin panel
+- [ ] Rate limiting enabled
+- [ ] Webhook signature verified (Tribute.tg)
+- [ ] SQL injection protection (SQLModel ORM)
+- [ ] CORS configured correctly
+- [ ] Logging doesn't contain secrets
+- [ ] Database backups configured

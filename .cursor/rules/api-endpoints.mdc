@@ -1,0 +1,464 @@
+---
+alwaysApply: false
+---
+## Webhook Endpoints
+
+### Tribute.tg Webhook
+```
+POST /api/webhooks/tribute
+```
+
+**Headers**:
+```
+X-Tribute-Signature: <hmac_sha256_signature>
+Content-Type: application/json
+```
+
+**Payload (payment.succeeded)**:
+```json
+{
+  "event": "payment.succeeded",
+  "transaction_id": "trib_abc123def456",
+  "amount": 30000,
+  "currency": "RUB",
+  "metadata": {
+    "user_id": 123,
+    "subscription_tier": "pro"
+  },
+  "timestamp": "2024-01-15T10:30:00Z",
+  "signature": "hmac_signature_here"
+}
+```
+
+**Response**:
+```json
+{
+  "status": "ok"
+}
+```
+
+**Error Response (403)**:
+```json
+{
+  "detail": "Invalid signature"
+}
+```
+
+---
+
+## Admin Dashboard
+
+### Get Dashboard Statistics
+```
+GET /admin/
+```
+
+**Response**:
+```json
+{
+  "users": {
+    "total": 1523,
+    "new_24h": 45,
+    "active_7d": 823
+  },
+  "subscriptions": {
+    "free": 1200,
+    "pro": 250,
+    "ultra": 73
+  },
+  "payments": {
+    "today": 15000,
+    "month": 450000,
+    "total": 2340000
+  },
+  "referrals": {
+    "total": 456,
+    "conversion": 30.5
+  }
+}
+```
+
+---
+
+## User Management
+
+### List Users
+```
+GET /admin/users?page=1&limit=50&subscription=pro&search=username
+```
+
+**Query Parameters**:
+- `page` (int, default: 1)
+- `limit` (int, default: 50, max: 100)
+- `subscription` (enum: free|pro|ultra, optional)
+- `search` (string, optional) - search by username or telegram_id
+
+**Response**:
+```json
+{
+  "total": 250,
+  "page": 1,
+  "limit": 50,
+  "users": [
+    {
+      "id": 123,
+      "telegram_id": 987654321,
+      "username": "johndoe",
+      "subscription_tier": "pro",
+      "subscription_expires_at": "2024-02-15T10:30:00Z",
+      "is_banned": false,
+      "created_at": "2024-01-01T10:00:00Z"
+    },
+    ...
+  ]
+}
+```
+
+### Get User Details
+```
+GET /admin/users/{user_id}
+```
+
+**Response**:
+```json
+{
+  "user": {
+    "id": 123,
+    "telegram_id": 987654321,
+    "username": "johndoe",
+    "subscription_tier": "pro",
+    "subscription_expires_at": "2024-02-15T10:30:00Z",
+    "referrer_id": 456,
+    "is_banned": false,
+    "created_at": "2024-01-01T10:00:00Z",
+    "updated_at": "2024-01-15T10:30:00Z"
+  },
+  "limits": {
+    "analytics_used": 25,
+    "analytics_limit": -1,
+    "themes_used": 45,
+    "themes_limit": 100,
+    "reset_at": "2024-02-01T00:00:00Z"
+  },
+  "stats": {
+    "total_analyses": 25,
+    "total_themes": 45,
+    "total_referrals": 5,
+    "total_payments": 2
+  }
+}
+```
+
+### Ban User
+```
+POST /admin/users/{user_id}/ban
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "message": "User banned successfully"
+}
+```
+
+### Unban User
+```
+POST /admin/users/{user_id}/unban
+```
+
+### Extend Subscription
+```
+POST /admin/users/{user_id}/extend-subscription
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "days": 30,
+  "tier": "pro"
+}
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "subscription_tier": "pro",
+  "subscription_expires_at": "2024-02-15T10:30:00Z"
+}
+```
+
+---
+
+## Analytics Management
+
+### Get Analytics Statistics
+```
+GET /admin/analytics?from_date=2024-01-01&to_date=2024-01-31
+```
+
+**Response**:
+```json
+{
+  "total_analyses": 1245,
+  "successful": 1198,
+  "failed": 47,
+  "average_rows": 5430,
+  "top_users": [
+    {
+      "user_id": 123,
+      "username": "johndoe",
+      "analyses_count": 45
+    },
+    ...
+  ],
+  "average_kpi": {
+    "cpm": 12.45,
+    "conversion_rate": 2.5
+  }
+}
+```
+
+### Get User Analytics Reports
+```
+GET /admin/analytics/reports?user_id=123&limit=10
+```
+
+**Response**:
+```json
+{
+  "reports": [
+    {
+      "id": 456,
+      "csv_analysis_id": 789,
+      "filename": "sales_2024.csv",
+      "row_count": 5430,
+      "kpi_data": {
+        "total_sales": 1234,
+        "total_revenue": 567.89,
+        "cpm": 12.34
+      },
+      "created_at": "2024-01-15T10:30:00Z"
+    },
+    ...
+  ]
+}
+```
+
+---
+
+## Payment Management
+
+### List Payments
+```
+GET /admin/payments?status=completed&from_date=2024-01-01&limit=50
+```
+
+**Query Parameters**:
+- `status` (enum: pending|completed|failed|refunded, optional)
+- `from_date` (date, optional)
+- `to_date` (date, optional)
+- `page` (int, default: 1)
+- `limit` (int, default: 50)
+
+**Response**:
+```json
+{
+  "total": 245,
+  "total_amount": 2450000,
+  "payments": [
+    {
+      "id": 123,
+      "user_id": 456,
+      "username": "johndoe",
+      "tribute_transaction_id": "trib_abc123",
+      "amount": 30000,
+      "currency": "RUB",
+      "status": "completed",
+      "subscription_tier": "pro",
+      "created_at": "2024-01-15T10:30:00Z",
+      "completed_at": "2024-01-15T10:31:00Z"
+    },
+    ...
+  ]
+}
+```
+
+### Refund Payment
+```
+POST /admin/payments/{payment_id}/refund
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "reason": "User request"
+}
+```
+
+**Response**:
+```json
+{
+  "status": "success",
+  "payment_id": 123,
+  "refunded_amount": 30000
+}
+```
+
+---
+
+## Broadcast Management
+
+### List Broadcasts
+```
+GET /admin/broadcasts?status=completed&limit=20
+```
+
+**Response**:
+```json
+{
+  "broadcasts": [
+    {
+      "id": 123,
+      "admin_id": 1,
+      "message_text": "Новая функция!",
+      "target_subscription": "pro",
+      "status": "completed",
+      "sent_count": 245,
+      "error_count": 5,
+      "created_at": "2024-01-15T10:00:00Z",
+      "completed_at": "2024-01-15T10:15:00Z"
+    },
+    ...
+  ]
+}
+```
+
+### Create Broadcast
+```
+POST /admin/broadcasts
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "message_text": "Важное объявление!",
+  "target_subscription": "pro"  // or null for all users
+}
+```
+
+**Response**:
+```json
+{
+  "id": 124,
+  "status": "draft",
+  "created_at": "2024-01-15T10:30:00Z"
+}
+```
+
+### Send Broadcast
+```
+POST /admin/broadcasts/{broadcast_id}/send
+```
+
+**Response**:
+```json
+{
+  "status": "in_progress",
+  "broadcast_id": 124,
+  "estimated_recipients": 245
+}
+```
+
+### Get Broadcast Status
+```
+GET /admin/broadcasts/{broadcast_id}
+```
+
+**Response**:
+```json
+{
+  "id": 124,
+  "status": "in_progress",
+  "sent_count": 120,
+  "error_count": 2,
+  "estimated_recipients": 245,
+  "progress_percentage": 48.9
+}
+```
+
+---
+
+## Referral Statistics
+
+### Get Referral Statistics
+```
+GET /admin/referrals?from_date=2024-01-01
+```
+
+**Response**:
+```json
+{
+  "total_referrals": 456,
+  "referrals_with_subscription": 123,
+  "total_iq_points_awarded": 123,
+  "conversion_rate": 26.97,
+  "top_referrers": [
+    {
+      "user_id": 123,
+      "username": "johndoe",
+      "referrals_count": 25,
+      "referrals_with_subscription": 18,
+      "iq_points_earned": 18
+    },
+    ...
+  ]
+}
+```
+
+---
+
+## Error Responses
+
+### 400 Bad Request
+```json
+{
+  "detail": "Invalid input data",
+  "errors": [
+    {"field": "days", "message": "Must be positive integer"}
+  ]
+}
+```
+
+### 401 Unauthorized
+```json
+{
+  "detail": "Authentication required"
+}
+```
+
+### 403 Forbidden
+```json
+{
+  "detail": "Access denied"
+}
+```
+
+### 404 Not Found
+```json
+{
+  "detail": "User not found"
+}
+```
+
+### 500 Internal Server Error
+```json
+{
+  "detail": "Internal server error",
+  "error_id": "err_abc123"
+}
+```

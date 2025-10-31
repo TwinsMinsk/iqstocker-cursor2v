@@ -1,0 +1,585 @@
+---
+alwaysApply: false
+---
+# IQStocker v2.0 - Code Style Guide
+
+## Python Version
+- **Minimum**: Python 3.11
+- **Use**: Modern syntax (match-case, | unions, improved type hints)
+
+## Type Hints (MANDATORY)
+
+### Use | for Unions
+```python
+# ✅ CORRECT
+def get_user(id: int) -> User | None:
+    ...
+
+# ❌ WRONG
+from typing import Optional
+def get_user(id: int) -> Optional[User]:
+    ...
+```
+
+### Type All Functions
+```python
+# ✅ CORRECT
+async def create_user(
+    session: AsyncSession,
+    telegram_id: int,
+    username: str | None = None
+) -> User:
+    ...
+
+# ❌ WRONG
+async def create_user(session, telegram_id, username=None):
+    ...
+```
+
+### Generic Types
+```python
+# ✅ CORRECT
+from typing import Generic, TypeVar
+
+T = TypeVar("T", bound=SQLModel)
+
+class BaseRepository(Generic[T]):
+    def __init__(self, model: type[T]):
+        self.model = model
+```
+
+## Async/Await
+
+### ALL I/O Must Be Async
+```python
+# ✅ CORRECT
+async def get_user(session: AsyncSession, id: int) -> User | None:
+    result = await session.execute(select(User).where(User.id == id))
+    return result.scalar_one_or_none()
+
+# ❌ WRONG - sync operation
+def get_user(session: Session, id: int) -> User | None:
+    return session.query(User).filter(User.id == id).first()
+```
+
+### Async Context Managers
+```python
+# ✅ CORRECT
+async with get_session() as session:
+    user = await user_repo.get(session, id)
+
+# ❌ WRONG - not using async with
+session = get_session()
+user = await user_repo.get(session, id)
+```
+
+### Async HTTP Requests
+```python
+# ✅ CORRECT
+import httpx
+
+async with httpx.AsyncClient() as client:
+    response = await client.post(url, json=data)
+
+# ❌ WRONG - sync requests
+import requests
+response = requests.post(url, json=data)
+```
+
+## Naming Conventions
+
+### Files & Modules
+- **snake_case**: `user_service.py`, `analytics_repo.py`
+
+### Classes
+- **PascalCase**: `UserService`, `AnalyticsReport`
+
+### Functions & Variables
+- **snake_case**: `get_user()`, `total_sales`
+
+### Constants
+- **UPPER_SNAKE_CASE**: `MAX_FILE_SIZE`, `DEFAULT_LIMIT`
+
+### Private Members
+- **Leading underscore**: `_process_data()`, `_cache`
+
+## Docstrings
+
+### Google Style
+```python
+async def create_payment_link(
+    session: AsyncSession,
+    user_id: int,
+    tier: SubscriptionTier,
+    amount: int
+) -> str:
+    """
+    Create payment link for subscription via Tribute.tg.
+    
+    Args:
+        session: Database session
+        user_id: User ID
+        tier: Subscription tier (PRO or ULTRA)
+        amount: Amount in kopecks (30000 = 300 RUB)
+    
+    Returns:
+        Payment URL for user to complete purchase
+    
+    Raises:
+        ValueError: If tier invalid or amount <= 0
+        HTTPException: If Tribute API request fails
+    
+    Example:
+        >>> url = await create_payment_link(session, 123, SubscriptionTier.PRO, 30000)
+        >>> print(url)
+        'https://tribute.tg/pay/...'
+    """
+    ...
+```
+
+### Module Docstrings
+```python
+"""
+User service module.
+
+Handles all user-related business logic including registration,
+subscription management, and profile updates.
+"""
+```
+
+## Import Organization
+
+### Order
+1. Standard library
+2. Third-party packages
+3. Local imports
+
+### Format
+```python
+# Standard library
+import hmac
+import hashlib
+from datetime import datetime, timedelta
+from typing import Generic, TypeVar
+
+# Third-party
+from aiogram import Router, F
+from aiogram.types import Message
+from sqlmodel import SQLModel, Field, select
+import structlog
+
+# Local
+from src.database.models import User, SubscriptionTier
+from src.database.repositories import UserRepository
+from src.bot.lexicon.lexicon_ru import LEXICON_RU
+```
+
+## Error Handling
+
+### Specific Exceptions
+```python
+# ✅ CORRECT
+try:
+    user = await user_repo.get(session, id)
+    if not user:
+        raise ValueError(f"User {id} not found")
+except ValueError as e:
+    logger.error("user_not_found", user_id=id, error=str(e))
+    raise
+except Exception as e:
+    logger.exception("unexpected_error", user_id=id)
+    raise
+
+# ❌ WRONG - generic exception
+try:
+    user = await user_repo.get(session, id)
+except:
+    print("Error")
+    pass
+```
+
+### Logging Errors
+```python
+# ✅ CORRECT
+import structlog
+logger = structlog.get_logger(__name__)
+
+try:
+    result = await process_csv(file_id)
+except ValueError as e:
+    logger.error("csv_validation_failed", file_id=file_id, error=str(e))
+    raise
+except Exception as e:
+    logger.exception("csv_processing_failed", file_id=file_id)
+    raise
+
+# ❌ WRONG - print statements
+try:
+    result = await process_csv(file_id)
+except Exception as e:
+    print(f"Error: {e}")
+```
+
+## SQLModel Patterns
+
+### Model Definition
+```python
+# ✅ CORRECT
+from sqlmodel import SQLModel, Field
+from datetime import datetime
+from enum import Enum
+
+class SubscriptionTier(str, Enum):
+    FREE = "free"
+    PRO = "pro"
+    ULTRA = "ultra"
+
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+    
+    id: int | None = Field(default=None, primary_key=True)
+    telegram_id: int = Field(unique=True, index=True)
+    username: str | None = Field(default=None, max_length=255)
+    subscription_tier: SubscriptionTier = Field(default=SubscriptionTier.FREE)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+# ❌ WRONG - missing Field(), no constraints
+class User(SQLModel, table=True):
+    id: int
+    telegram_id: int
+    username: str
+```
+
+### Queries
+```python
+# ✅ CORRECT
+result = await session.execute(
+    select(User)
+    .where(User.telegram_id == telegram_id)
+    .where(User.is_banned == False)
+)
+user = result.scalar_one_or_none()
+
+# ❌ WRONG - no await, old-style filter
+user = session.query(User).filter(
+    User.telegram_id == telegram_id
+).first()
+```
+
+## Lexicon Usage
+
+### ALWAYS Use Lexicon
+```python
+# ✅ CORRECT
+from src.bot.lexicon.lexicon_ru import LEXICON_RU, LEXICON_COMMANDS_RU
+
+await message.answer(LEXICON_RU["start"].format(username=user.username))
+button = InlineKeyboardButton(text=LEXICON_COMMANDS_RU["profile"], callback_data="profile")
+
+# ❌ WRONG - hardcoded text
+await message.answer("Привет!")
+await message.answer(f"Привет, {user.username}!")
+```
+
+### Adding New Text
+If text not in lexicon:
+1. Open `src/bot/lexicon/lexicon_ru.py`
+2. Add to appropriate section
+3. Use descriptive key
+4. Reference in code
+
+```python
+# In lexicon_ru.py
+LEXICON_RU = {
+    ...
+    "new_feature_intro": (
+        "🎉 <b>Новая функция!</b>
+
+"
+        "Теперь доступно: {feature_name}
+"
+        "Попробуй сейчас!"
+    ),
+    ...
+}
+
+# In handler
+await message.answer(LEXICON_RU["new_feature_intro"].format(feature_name="Календарь"))
+```
+
+## Structlog Usage
+
+### Logger Setup
+```python
+import structlog
+
+logger = structlog.get_logger(__name__)
+```
+
+### Structured Logging
+```python
+# ✅ CORRECT
+logger.info(
+    "user_registered",
+    user_id=user.id,
+    telegram_id=user.telegram_id,
+    subscription_tier=user.subscription_tier
+)
+
+logger.error(
+    "payment_failed",
+    user_id=user.id,
+    payment_id=payment.id,
+    error=str(e)
+)
+
+# ❌ WRONG - string formatting
+logger.info(f"User {user.id} registered with {user.subscription_tier}")
+```
+
+### Error Logging with Traceback
+```python
+# ✅ CORRECT
+try:
+    result = await dangerous_operation()
+except Exception as e:
+    logger.exception("operation_failed", user_id=user_id)
+    raise
+
+# ❌ WRONG - no traceback
+try:
+    result = await dangerous_operation()
+except Exception as e:
+    logger.error(f"Error: {e}")
+```
+
+## Repository Pattern
+
+### Generic Base
+```python
+# ✅ CORRECT
+from typing import Generic, TypeVar
+from sqlmodel import SQLModel, select
+
+T = TypeVar("T", bound=SQLModel)
+
+class BaseRepository(Generic[T]):
+    def __init__(self, model: type[T]):
+        self.model = model
+    
+    async def get(self, session: AsyncSession, id: int) -> T | None:
+        result = await session.execute(select(self.model).where(self.model.id == id))
+        return result.scalar_one_or_none()
+```
+
+### Specific Repository
+```python
+# ✅ CORRECT
+class UserRepository(BaseRepository[User]):
+    def __init__(self):
+        super().__init__(User)
+    
+    async def get_by_telegram_id(self, session: AsyncSession, telegram_id: int) -> User | None:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        return result.scalar_one_or_none()
+```
+
+## Service Pattern
+
+### Dependency Injection
+```python
+# ✅ CORRECT
+class UserService:
+    def __init__(
+        self,
+        user_repo: UserRepository,
+        limits_repo: LimitsRepository,
+        referral_service: ReferralService
+    ):
+        self.user_repo = user_repo
+        self.limits_repo = limits_repo
+        self.referral_service = referral_service
+    
+    async def register_user(self, session: AsyncSession, telegram_id: int) -> User:
+        # Business logic using injected dependencies
+        ...
+```
+
+### NO Business Logic in Repositories
+```python
+# ✅ CORRECT - in Service
+class UserService:
+    async def can_use_analytics(self, session: AsyncSession, user_id: int) -> bool:
+        limits = await self.limits_repo.get_by_user_id(session, user_id)
+        if limits.analytics_limit == -1:
+            return True
+        return limits.analytics_used < limits.analytics_limit
+
+# ❌ WRONG - business logic in Repository
+class LimitsRepository:
+    async def can_use_analytics(self, session: AsyncSession, user_id: int) -> bool:
+        # Business logic doesn't belong here!
+        ...
+```
+
+## Testing
+
+### Test File Naming
+- `test_<module>.py`
+- Example: `test_user_service.py`
+
+### Test Function Naming
+- `test_<function>_<scenario>`
+- Example: `test_register_user_creates_limits`
+
+### Pytest Fixtures
+```python
+@pytest.fixture
+async def test_session():
+    """Provide test database session."""
+    async with AsyncSession(test_engine) as session:
+        yield session
+        await session.rollback()
+
+@pytest.mark.asyncio
+async def test_user_registration(test_session):
+    """Test user registration creates user and limits."""
+    user_service = UserService(user_repo, limits_repo)
+    
+    user = await user_service.register_user(test_session, 123456, "testuser")
+    
+    assert user.id is not None
+    assert user.telegram_id == 123456
+    assert user.subscription_tier == SubscriptionTier.FREE
+```
+
+## File Organization
+
+### Keep Files Focused
+- Each handler file: ONE feature
+- Each service: ONE domain
+- Each repository: ONE model
+
+### Max File Length
+- Target: < 300 lines
+- Split if exceeds 500 lines
+
+### Module Structure
+```
+module/
+├── __init__.py       # Public API exports
+├── models.py         # Data models (if module-specific)
+├── service.py        # Business logic
+├── repository.py     # Data access
+└── utils.py          # Helper functions
+```
+
+## Comments
+
+### When to Comment
+- Complex algorithms
+- Business rules
+- Non-obvious decisions
+- TODO/FIXME markers
+
+### When NOT to Comment
+- Obvious code
+- Self-explanatory function names
+- Already documented in docstring
+
+```python
+# ✅ GOOD COMMENT
+# Tribute.tg expects amount in kopecks (100 kopecks = 1 RUB)
+amount_kopecks = amount_rub * 100
+
+# ❌ BAD COMMENT - obvious
+# Create user
+user = User(telegram_id=telegram_id)
+
+# ✅ GOOD - explains WHY
+# Use HMAC for signature verification to prevent timing attacks
+if not hmac.compare_digest(expected, signature):
+    raise HTTPException(403, "Invalid signature")
+```
+
+## Code Formatting
+
+### Line Length
+- **Max**: 120 characters
+- Configured in pyproject.toml
+
+### String Quotes
+- **Prefer**: Double quotes `"`
+- **Exception**: Avoid escaping
+
+```python
+# ✅ CORRECT
+message = "Hello, world!"
+sql = 'SELECT * FROM users WHERE name = "John"'
+
+# ❌ WRONG
+message = 'Hello, world!'
+```
+
+### Blank Lines
+- 2 blank lines between top-level definitions
+- 1 blank line between methods
+- No blank line at end of file
+
+### Trailing Commas
+- **Use** in multi-line structures
+
+```python
+# ✅ CORRECT
+data = {
+    "user_id": 123,
+    "username": "john",
+    "active": True,  # Trailing comma
+}
+
+# ❌ WRONG
+data = {
+    "user_id": 123,
+    "username": "john",
+    "active": True
+}
+```
+
+## Tools Configuration
+
+All configured in `pyproject.toml`:
+
+### Ruff
+```toml
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+select = ["E", "F", "I", "N", "W"]
+```
+
+### Mypy
+```toml
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+disallow_untyped_defs = true
+```
+
+### Pytest
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+```
+
+## Pre-Commit Checklist
+
+Before committing:
+1. ✅ Run `poetry run ruff check src/`
+2. ✅ Run `poetry run ruff format src/`
+3. ✅ Run `poetry run mypy src/`
+4. ✅ Run `poetry run pytest`
+5. ✅ All tests pass
+6. ✅ No type errors
+7. ✅ Code formatted

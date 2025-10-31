@@ -1,0 +1,432 @@
+---
+alwaysApply: false
+---
+
+# IQStocker v2.0 - Telegram Handlers Structure
+
+## Handler Files (12 modules)
+
+Located in: `src/bot/handlers/`
+
+### 1. start.py - Registration & Welcome
+**Commands**: `/start`, `/start ref_{user_id}`
+
+**Responsibilities**:
+- User registration
+- Referral code processing
+- Channel subscription check
+- Welcome message
+
+**Flow**:
+```python
+@router.message(Command("start"))
+async def start_handler(message: Message, session: AsyncSession):
+    # 1. Parse referral code
+    referrer_id = parse_referral_code(message.text)
+    
+    # 2. Check channel subscription
+    if not await is_subscribed_to_channel(message.from_user.id):
+        await message.answer(LEXICON_RU["channel_check"])
+        return
+    
+    # 3. Get or create user
+    user = await user_service.get_or_create(
+        session,
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        referrer_id=referrer_id
+    )
+    
+    # 4. Send welcome message
+    if user.created_at == user.updated_at:  # New user
+        await message.answer(LEXICON_RU["start"].format(username=user.username))
+    else:  # Returning user
+        limits = await limits_repo.get_by_user_id(session, user.id)
+        await message.answer(LEXICON_RU["start_registered"].format(
+            username=user.username,
+            subscription=user.subscription_tier,
+            analytics_left=limits.analytics_limit - limits.analytics_used,
+            analytics_limit=limits.analytics_limit,
+            themes_left=limits.themes_limit - limits.themes_used,
+            themes_limit=limits.themes_limit
+        ))
+    
+    # 5. Show main menu
+    await message.answer(
+        LEXICON_RU["main_menu"],
+        reply_markup=get_main_menu_keyboard()
+    )
+```
+
+### 2. menu.py - Main Menu Navigation
+**Responsibilities**:
+- Main menu display
+- Navigation between sections
+- Back button handling
+
+**Keyboard Structure**:
+```python
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["profile"], callback_data="profile")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["analytics"], callback_data="analytics")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["themes"], callback_data="themes")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["lessons"], callback_data="lessons")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["calendar"], callback_data="calendar")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["referral"], callback_data="referral")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["faq"], callback_data="faq")],
+        [InlineKeyboardButton(text=LEXICON_COMMANDS_RU["support"], callback_data="support")]
+    ])
+```
+
+### 3. profile.py - User Profile
+**Responsibilities**:
+- Display user profile
+- Show subscription status
+- Display limits and usage
+
+**Example**:
+```python
+@router.callback_query(F.data == "profile")
+async def profile_handler(callback: CallbackQuery, session: AsyncSession):
+    user = await user_service.get_with_limits(session, callback.from_user.id)
+    limits = user.limits
+    
+    # Calculate referral stats
+    referrals_count = await referral_service.count_referrals(session, user.id)
+    iq_points = user.iq_points
+    referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
+    
+    await callback.message.edit_text(
+        LEXICON_RU["profile"].format(
+            telegram_id=user.telegram_id,
+            username=user.username or "не указан",
+            registration_date=user.created_at.strftime("%d.%m.%Y"),
+            subscription=user.subscription_tier.upper(),
+            expires_at=user.subscription_expires_at.strftime("%d.%m.%Y %H:%M") if user.subscription_expires_at else "Бессрочно",
+            analytics_used=limits.analytics_used,
+            analytics_limit="∞" if limits.analytics_limit == -1 else limits.analytics_limit,
+            themes_used=limits.themes_used,
+            themes_limit="∞" if limits.themes_limit == -1 else limits.themes_limit,
+            reset_at=limits.reset_at.strftime("%d.%m.%Y"),
+            iq_points=iq_points,
+            referrals_count=referrals_count,
+            referral_link=referral_link
+        ),
+        reply_markup=get_profile_keyboard()
+    )
+```
+
+### 4. analytics.py - CSV Analysis
+**Commands**: `/analytics`
+**FSM States**: `AnalyticsStates.waiting_for_csv`
+
+**Flow**:
+1. Check limits
+2. Request CSV file (FSM state)
+3. Validate file format
+4. Save to database
+5. Enqueue ARQ job
+6. Notify user about processing
+
+**Example**:
+```python
+@router.message(Command("analytics"))
+async def analytics_start(message: Message, state: FSMContext, session: AsyncSession):
+    # Check limits
+    if not await user_service.can_use_analytics(session, message.from_user.id):
+        limits = await limits_repo.get_by_user_id(session, user.id)
+        await message.answer(LEXICON_RU["analytics_limit_reached"].format(
+            used=limits.analytics_used,
+            limit=limits.analytics_limit,
+            reset_date=limits.reset_at.strftime("%d.%m.%Y")
+        ))
+        return
+    
+    await message.answer(LEXICON_RU["analytics_start"])
+    await state.set_state(AnalyticsStates.waiting_for_csv)
+
+@router.message(StateFilter(AnalyticsStates.waiting_for_csv), F.document)
+async def analytics_receive_csv(message: Message, state: FSMContext, session: AsyncSession):
+    # Validate file
+    if not message.document.file_name.endswith('.csv'):
+        await message.answer(LEXICON_RU["error_invalid_format"])
+        return
+    
+    # Create analysis record
+    csv_analysis = await analytics_service.create_analysis(
+        session,
+        user_id=message.from_user.id,
+        file_id=message.document.file_id,
+        filename=message.document.file_name
+    )
+    
+    # Increment usage
+    await limits_service.increment_analytics(session, message.from_user.id)
+    
+    # Enqueue background job
+    await arq_redis.enqueue_job("process_csv", csv_analysis.id)
+    
+    await message.answer(LEXICON_RU["analytics_processing"])
+    await state.clear()
+```
+
+### 5. themes.py - Theme Generation
+**Responsibilities**:
+- Display theme categories
+- Generate themes
+- Track usage
+
+**Categories**:
+- Vectors
+- Photos
+- Videos
+- Audio
+- Templates
+
+**Example**:
+```python
+class ThemeCallback(CallbackData, prefix="theme"):
+    category: str
+
+@router.callback_query(F.data == "themes")
+async def themes_start(callback: CallbackQuery):
+    await callback.message.edit_text(
+        LEXICON_RU["themes_start"],
+        reply_markup=get_theme_categories_keyboard()
+    )
+
+@router.callback_query(ThemeCallback.filter())
+async def theme_generate(callback: CallbackQuery, callback_data: ThemeCallback, session: AsyncSession):
+    # Check limits
+    if not await user_service.can_use_themes(session, callback.from_user.id):
+        await callback.answer(LEXICON_RU["themes_limit_reached"], show_alert=True)
+        return
+    
+    # Generate theme
+    theme = await theme_service.generate_theme(session, callback.from_user.id, callback_data.category)
+    
+    await callback.message.edit_text(
+        LEXICON_RU["theme_generated"].format(
+            category=callback_data.category,
+            theme=theme.theme,
+            description=theme.description,
+            relevance=theme.relevance,
+            keywords=", ".join(theme.keywords)
+        ),
+        reply_markup=get_theme_actions_keyboard(callback_data.category)
+    )
+```
+
+### 6. lessons.py - Educational Content
+**Responsibilities**:
+- Display lesson categories
+- Show lesson content
+- Track completed lessons
+
+**Lesson Structure**:
+```python
+LESSONS = {
+    "basics": {
+        "title": "Основы Adobe Stock",
+        "lessons": [
+            {
+                "id": "basics_1",
+                "title": "Регистрация и первые шаги",
+                "content": "...",
+                "key_points": ["...", "..."]
+            },
+            ...
+        ]
+    },
+    ...
+}
+```
+
+### 7. calendar.py - Content Calendar
+**Responsibilities**:
+- Show content calendar
+- Upcoming events
+- Seasonal trends
+
+### 8. faq.py - FAQ Section
+**Responsibilities**:
+- Display FAQ categories
+- Show answers
+- Search functionality
+
+### 9. channel.py - Subscription Check
+**Middleware**: Applied to all handlers
+
+**Flow**:
+```python
+class ChannelSubscriptionMiddleware:
+    async def __call__(self, handler, event, data):
+        user_id = event.from_user.id
+        
+        # Check if subscribed
+        try:
+            member = await bot.get_chat_member(CHANNEL_ID, user_id)
+            if member.status in ["member", "administrator", "creator"]:
+                return await handler(event, data)
+        except Exception:
+            pass
+        
+        # Not subscribed
+        await event.answer(
+            LEXICON_RU["channel_check"].format(channel_link=CHANNEL_LINK),
+            reply_markup=get_channel_subscription_keyboard()
+        )
+```
+
+### 10. referral.py - Referral Program
+**Responsibilities**:
+- Show referral statistics
+- Display referral link
+- Track referral tree
+
+**Example**:
+```python
+@router.callback_query(F.data == "referral")
+async def referral_stats(callback: CallbackQuery, session: AsyncSession):
+    user = await user_repo.get_by_telegram_id(session, callback.from_user.id)
+    
+    # Get referral stats
+    referrals = await referral_service.get_referrals(session, user.id)
+    referrals_with_subscription = await referral_service.count_referrals_with_subscription(session, user.id)
+    referral_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user.id}"
+    
+    await callback.message.edit_text(
+        LEXICON_RU["referral_balance"].format(
+            iq_points=user.iq_points,
+            referrals_count=len(referrals),
+            referrals_with_subscription=referrals_with_subscription,
+            referral_link=referral_link
+        ),
+        reply_markup=get_referral_keyboard()
+    )
+```
+
+### 11. payments.py - Payment Processing
+**Responsibilities**:
+- Display subscription plans
+- Generate payment links (Tribute.tg)
+- Handle payment callbacks
+
+**Example**:
+```python
+class SubscriptionCallback(CallbackData, prefix="sub"):
+    action: str  # "buy"
+    tier: str    # "pro", "ultra"
+
+@router.callback_query(SubscriptionCallback.filter(F.action == "buy"))
+async def buy_subscription(callback: CallbackQuery, callback_data: SubscriptionCallback, session: AsyncSession):
+    # Create payment
+    payment_link = await payment_service.create_payment_link(
+        session,
+        user_id=callback.from_user.id,
+        tier=callback_data.tier,
+        amount=30000 if callback_data.tier == "pro" else 60000
+    )
+    
+    await callback.message.edit_text(
+        LEXICON_RU["payment_link"].format(
+            subscription=callback_data.tier.upper(),
+            amount=300 if callback_data.tier == "pro" else 600,
+            payment_url=payment_link
+        ),
+        reply_markup=get_payment_keyboard()
+    )
+```
+
+### 12. admin.py - Admin Commands
+**Commands**: `/admin`, `/broadcast`, `/stats`
+**Filter**: Only for ADMIN_IDS
+
+**Responsibilities**:
+- Display admin panel
+- User management
+- Broadcast messages
+- Statistics
+
+**Example**:
+```python
+@router.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
+async def admin_panel(message: Message):
+    await message.answer(
+        LEXICON_RU["admin_panel"],
+        reply_markup=get_admin_keyboard()
+    )
+
+@router.message(Command("broadcast"), F.from_user.id.in_(ADMIN_IDS))
+async def broadcast_start(message: Message, state: FSMContext):
+    await message.answer(LEXICON_RU["broadcast_start"])
+    await state.set_state(BroadcastStates.waiting_for_text)
+
+@router.message(StateFilter(BroadcastStates.waiting_for_text))
+async def broadcast_receive_text(message: Message, state: FSMContext, session: AsyncSession):
+    # Save broadcast
+    broadcast = await broadcast_service.create(
+        session,
+        admin_id=message.from_user.id,
+        message_text=message.text
+    )
+    
+    # Get estimated count
+    recipients_count = await user_repo.count_active_users(session)
+    
+    await message.answer(
+        LEXICON_RU["broadcast_confirm"].format(
+            message_text=message.text,
+            recipients_count=recipients_count
+        ),
+        reply_markup=get_broadcast_confirm_keyboard(broadcast.id)
+    )
+    await state.set_state(BroadcastStates.confirming)
+```
+
+## Handler Registration
+
+All handlers registered in `src/bot/main.py`:
+
+```python
+from src.bot.handlers import (
+    start, menu, profile, analytics, themes,
+    lessons, calendar, faq, channel, referral,
+    payments, admin
+)
+
+# Register routers
+dp.include_router(start.router)
+dp.include_router(menu.router)
+dp.include_router(profile.router)
+# ... etc
+```
+
+## FSM States
+
+Defined in `src/bot/states/fsm.py`:
+
+```python
+class AnalyticsStates(StatesGroup):
+    waiting_for_csv = State()
+
+class ThemeStates(StatesGroup):
+    selecting_category = State()
+
+class BroadcastStates(StatesGroup):
+    waiting_for_text = State()
+    confirming = State()
+```
+
+## Keyboards
+
+Factory functions in `src/bot/keyboards/factories.py`:
+
+```python
+def get_main_menu_keyboard() -> InlineKeyboardMarkup: ...
+def get_profile_keyboard() -> InlineKeyboardMarkup: ...
+def get_theme_categories_keyboard() -> InlineKeyboardMarkup: ...
+def get_subscription_keyboard() -> InlineKeyboardMarkup: ...
+# ... etc
+```

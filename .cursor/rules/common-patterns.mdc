@@ -1,0 +1,500 @@
+---
+alwaysApply: false
+---
+# Common Patterns - IQStocker v2.0
+
+## Handler Patterns
+
+### 1. Basic Command Handler
+```python
+from aiogram import Router
+from aiogram.types import Message
+from aiogram.filters import Command
+from src.bot.lexicon.lexicon_ru import LEXICON_RU
+from src.bot.keyboards.main_kb import main_keyboard
+
+router = Router(name=__name__)
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        text=LEXICON_RU["start_message"],
+        reply_markup=main_keyboard()
+    )
+```
+
+### 2. Handler with Service Dependency
+```python
+from aiogram import Router
+from aiogram.types import Message
+from aiogram.filters import Command
+from src.services.user_service import UserService
+
+router = Router(name=__name__)
+
+@router.message(Command("profile"))
+async def cmd_profile(
+    message: Message,
+    user_service: UserService  # Dependency Injection
+):
+    user = await user_service.get_or_create_user(
+        telegram_id=message.from_user.id
+    )
+    
+    text = LEXICON_RU["profile_info"].format(
+        username=user.username or "User",
+        subscription_type=user.subscription_type.value,
+        subscription_end=user.subscription_end.strftime("%d.%m.%Y")
+    )
+    
+    await message.answer(text)
+```
+
+### 3. Callback Query Handler
+```python
+from aiogram import Router, F
+from aiogram.types import CallbackQuery
+from src.services.subscription_service import SubscriptionService
+
+router = Router(name=__name__)
+
+@router.callback_query(F.data.startswith("subscribe_"))
+async def process_subscription(
+    callback: CallbackQuery,
+    subscription_service: SubscriptionService
+):
+    # Extract subscription type from callback_data
+    subscription_type = callback.data.split("_")[1]  # "subscribe_pro" -> "pro"
+    
+    # Business logic
+    payment = await subscription_service.create_payment(
+        telegram_id=callback.from_user.id,
+        subscription_type=subscription_type
+    )
+    
+    # Response to user
+    await callback.message.edit_text(
+        text=LEXICON_RU["payment_created"].format(
+            amount=payment.amount,
+            payment_url=payment.url
+        )
+    )
+    
+    # Always answer callback
+    await callback.answer()
+```
+
+### 4. FSM Handler
+```python
+from aiogram import Router
+from aiogram.types import Message, Document
+from aiogram.fsm.context import FSMContext
+from src.bot.states.csv_states import CSVAnalysisStates
+from src.services.csv_service import CSVService
+
+router = Router(name=__name__)
+
+# Initialize FSM
+@router.message(Command("csv"))
+async def start_csv_analysis(message: Message, state: FSMContext):
+    await state.set_state(CSVAnalysisStates.waiting_for_file)
+    await message.answer(LEXICON_RU["csv_upload_prompt"])
+
+# Process in state
+@router.message(
+    CSVAnalysisStates.waiting_for_file,
+    F.document
+)
+async def process_csv_file(
+    message: Message,
+    state: FSMContext,
+    csv_service: CSVService
+):
+    # Check file type
+    if not message.document.file_name.endswith(('.csv', '.tsv')):
+        await message.answer(LEXICON_RU["csv_error_format"])
+        return
+    
+    # Download file
+    file = await message.bot.download(message.document)
+    content = file.read().decode('utf-8')
+    
+    # Business logic
+    result = await csv_service.analyze_csv(
+        content=content,
+        user_id=message.from_user.id
+    )
+    
+    # Result
+    if result.success:
+        await message.answer(
+            text=LEXICON_RU["csv_success"].format(
+                rows_count=result.rows_count,
+                tickers_count=len(result.tickers)
+            )
+        )
+    else:
+        await message.answer(LEXICON_RU["csv_error"])
+    
+    # Clear state
+    await state.clear()
+```
+
+## Service Patterns
+
+### 1. Basic Service
+```python
+from typing import Optional
+from src.repositories.user_repository import UserRepository
+from src.models.user import User, UserCreate, UserUpdate
+
+class UserService:
+    def __init__(self, user_repo: UserRepository):
+        self.user_repo = user_repo
+    
+    async def get_or_create_user(
+        self,
+        telegram_id: int,
+        username: Optional[str] = None
+    ) -> User:
+        user = await self.user_repo.get_by_telegram_id(telegram_id)
+        
+        if user is None:
+            user_data = UserCreate(
+                telegram_id=telegram_id,
+                username=username
+            )
+            user = await self.user_repo.create(user_data)
+        
+        return user
+    
+    async def update_user(
+        self,
+        user_id: int,
+        data: UserUpdate
+    ) -> User:
+        return await self.user_repo.update(user_id, data)
+```
+
+### 2. Service with Business Logic
+```python
+from datetime import datetime, timedelta
+from src.repositories.user_repository import UserRepository
+from src.repositories.limits_repository import LimitsRepository
+from src.models.user import SubscriptionType
+
+class SubscriptionService:
+    def __init__(
+        self,
+        user_repo: UserRepository,
+        limits_repo: LimitsRepository
+    ):
+        self.user_repo = user_repo
+        self.limits_repo = limits_repo
+    
+    async def upgrade_to_pro(
+        self,
+        telegram_id: int,
+        days: int
+    ) -> User:
+        # Get user
+        user = await self.user_repo.get_by_telegram_id(telegram_id)
+        if not user:
+            raise ValueError("User not found")
+        
+        # Calculate new end date
+        now = datetime.utcnow()
+        if user.subscription_end and user.subscription_end > now:
+            # Extend existing
+            new_end = user.subscription_end + timedelta(days=days)
+        else:
+            # New subscription
+            new_end = now + timedelta(days=days)
+        
+        # Update user
+        user.subscription_type = SubscriptionType.PRO
+        user.subscription_end = new_end
+        user = await self.user_repo.update(user.id, user)
+        
+        # Update limits
+        await self.limits_repo.update_limits_for_subscription(
+            user_id=user.id,
+            subscription_type=SubscriptionType.PRO
+        )
+        
+        return user
+```
+
+## Repository Patterns
+
+### 1. Basic Repository (Generic CRUD)
+```python
+from typing import TypeVar, Generic, Optional, List
+from sqlmodel import Session, select
+
+ModelType = TypeVar("ModelType")
+CreateSchemaType = TypeVar("CreateSchemaType")
+UpdateSchemaType = TypeVar("UpdateSchemaType")
+
+class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
+    def __init__(self, model: type[ModelType], session: Session):
+        self.model = model
+        self.session = session
+    
+    async def get(self, id: int) -> Optional[ModelType]:
+        statement = select(self.model).where(self.model.id == id)
+        result = await self.session.exec(statement)
+        return result.first()
+    
+    async def get_all(
+        self,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[ModelType]:
+        statement = select(self.model).offset(skip).limit(limit)
+        result = await self.session.exec(statement)
+        return result.all()
+    
+    async def create(self, data: CreateSchemaType) -> ModelType:
+        instance = self.model(**data.model_dump())
+        self.session.add(instance)
+        await self.session.commit()
+        await self.session.refresh(instance)
+        return instance
+    
+    async def update(
+        self,
+        id: int,
+        data: UpdateSchemaType
+    ) -> Optional[ModelType]:
+        instance = await self.get(id)
+        if not instance:
+            return None
+        
+        update_data = data.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(instance, key, value)
+        
+        await self.session.commit()
+        await self.session.refresh(instance)
+        return instance
+    
+    async def delete(self, id: int) -> bool:
+        instance = await self.get(id)
+        if not instance:
+            return False
+        
+        await self.session.delete(instance)
+        await self.session.commit()
+        return True
+```
+
+### 2. Specialized Repository
+```python
+from typing import Optional, List
+from sqlmodel import Session, select
+from src.models.user import User, UserCreate, UserUpdate
+from src.repositories.base import BaseRepository
+
+class UserRepository(BaseRepository[User, UserCreate, UserUpdate]):
+    def __init__(self, session: Session):
+        super().__init__(User, session)
+    
+    async def get_by_telegram_id(
+        self,
+        telegram_id: int
+    ) -> Optional[User]:
+        statement = select(User).where(User.telegram_id == telegram_id)
+        result = await self.session.exec(statement)
+        return result.first()
+    
+    async def get_by_referral_code(
+        self,
+        referral_code: str
+    ) -> Optional[User]:
+        statement = select(User).where(User.referral_code == referral_code)
+        result = await self.session.exec(statement)
+        return result.first()
+    
+    async def get_active_subscribers(self) -> List[User]:
+        statement = select(User).where(
+            User.subscription_end > datetime.utcnow()
+        )
+        result = await self.session.exec(statement)
+        return result.all()
+```
+
+## Keyboard Patterns
+
+### 1. Inline Keyboard
+```python
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from src.bot.lexicon.lexicon_ru import LEXICON_RU
+
+def subscription_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=LEXICON_RU["btn_subscribe_pro"],
+                    callback_data="subscribe_pro"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=LEXICON_RU["btn_subscribe_ultra"],
+                    callback_data="subscribe_ultra"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=LEXICON_RU["btn_back"],
+                    callback_data="back_to_menu"
+                )
+            ],
+        ]
+    )
+```
+
+### 2. Reply Keyboard
+```python
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from src.bot.lexicon.lexicon_ru import LEXICON_RU
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=LEXICON_RU["btn_csv_analysis"]),
+                KeyboardButton(text=LEXICON_RU["btn_subscription"])
+            ],
+            [
+                KeyboardButton(text=LEXICON_RU["btn_referral"]),
+                KeyboardButton(text=LEXICON_RU["btn_profile"])
+            ],
+        ],
+        resize_keyboard=True
+    )
+```
+
+### 3. Dynamic Keyboard (builder)
+```python
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from src.bot.lexicon.lexicon_ru import LEXICON_RU
+
+def period_keyboard(subscription_type: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    
+    periods = [
+        (7, 99),
+        (30, 299),
+        (90, 799),
+    ]
+    
+    for days, price in periods:
+        builder.button(
+            text=f"{days} days - {price} RUB",
+            callback_data=f"pay_{subscription_type}_{days}"
+        )
+    
+    builder.button(
+        text=LEXICON_RU["btn_back"],
+        callback_data="back_to_subscription"
+    )
+    
+    builder.adjust(1)  # 1 button per row
+    return builder.as_markup()
+```
+
+## Error Handling Patterns
+
+### 1. Handler Error Handling
+```python
+from aiogram import Router
+from aiogram.types import Message
+from src.core.logging import logger
+
+router = Router(name=__name__)
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message, user_service: UserService):
+    try:
+        user = await user_service.get_or_create_user(
+            telegram_id=message.from_user.id
+        )
+        
+        text = LEXICON_RU["profile_info"].format(
+            username=user.username or "User"
+        )
+        
+        await message.answer(text)
+        
+    except Exception as e:
+        logger.error(f"Error in cmd_profile: {e}", exc_info=True)
+        await message.answer(LEXICON_RU["error_unknown"])
+```
+
+### 2. Custom Exceptions
+```python
+# src/core/exceptions.py
+class IQStockerException(Exception):
+    pass
+
+class UserNotFoundException(IQStockerException):
+    pass
+
+class SubscriptionExpiredException(IQStockerException):
+    pass
+
+class LimitExceededException(IQStockerException):
+    pass
+
+class CSVValidationException(IQStockerException):
+    pass
+```
+
+## Important Rules
+
+### DO
+1. **Async everywhere**: all functions async/await
+2. **Type hints everywhere**: for IDE and mypy
+3. **Dependency Injection**: services through parameters
+4. **Logging**: for all important events
+5. **Error handling**: try/except with logging
+
+### DON'T
+1. **Don't block event loop**: no sync operations
+2. **Don't hardcode**: through config and lexicon
+3. **Don't mix layers**: handler → service → repository
+4. **Don't ignore errors**: always log
+5. **Don't forget await**: async functions
+
+## Quick Reference
+
+```python
+# Handler template
+@router.message(Command("..."))
+async def handler(message: Message, service: Service):
+    try:
+        result = await service.method(message.from_user.id)
+        await message.answer(LEXICON_RU["key"].format(...))
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        await message.answer(LEXICON_RU["error"])
+
+# Service template
+class Service:
+    def __init__(self, repo: Repository):
+        self.repo = repo
+    
+    async def method(self, user_id: int) -> Result:
+        # business logic
+        return await self.repo.operation(user_id)
+
+# Repository template
+class Repository(BaseRepository[Model, Create, Update]):
+    async def custom_query(self, param: type) -> Optional[Model]:
+        statement = select(Model).where(Model.field == param)
+        result = await self.session.exec(statement)
+        return result.first()
+```

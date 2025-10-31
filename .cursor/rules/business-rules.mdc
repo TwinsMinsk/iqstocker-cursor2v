@@ -1,0 +1,343 @@
+---
+alwaysApply: false
+---
+# IQStocker v2.0 - Business Rules
+
+## Subscription Tiers
+
+### FREE Tier
+- **Analytics**: 5 CSV analyses per month
+- **Themes**: 10 themes per month
+- **Features**: Basic functionality
+- **Price**: Free forever
+
+### PRO Tier
+- **Analytics**: Unlimited CSV analyses
+- **Themes**: 100 themes per month
+- **Features**: Priority support, exclusive lessons
+- **Price**: 300 RUB / 30 days
+
+### ULTRA Tier
+- **Analytics**: Unlimited CSV analyses
+- **Themes**: Unlimited themes
+- **Features**: VIP support 24/7, personal consultations, closed community, early access
+- **Price**: 600 RUB / 30 days
+
+### TEST_PRO Tier
+- **Purpose**: Testing only
+- **Same limits as PRO**
+- **Not available for purchase**
+
+## Limits Management
+
+### Monthly Reset
+- Limits reset every 30 days from activation
+- `reset_at` field in Limits table
+- Automatic reset via ARQ cron job
+
+### Limit Checking Logic
+```python
+def can_use_feature(used: int, limit: int) -> bool:
+    if limit == -1:  # Unlimited
+        return True
+    return used < limit
+```
+
+### Subscription Change
+When user upgrades/downgrades:
+1. Update `subscription_tier` in User
+2. Update `subscription_expires_at`
+3. Recalculate limits in Limits table:
+   - FREE: analytics_limit=5, themes_limit=10
+   - PRO: analytics_limit=-1, themes_limit=100
+   - ULTRA: analytics_limit=-1, themes_limit=-1
+4. Reset `reset_at` to 30 days from now
+
+## Referral Program
+
+### IQ Points System
+
+**How it works:**
+- Each user has a unique referral link
+- When someone registers via referral link and purchases PRO or ULTRA subscription, the referrer gets **+1 IQ Point**
+- Points accumulate and never expire
+- Points can be exchanged for bonuses anytime in the "Use Points" section
+
+### Referral Link Format
+```
+https://t.me/{BOT_USERNAME}?start=ref_{user_id}
+```
+
+### Point Accrual Logic
+```python
+async def track_referral_purchase(referred_id: int, referrer_id: int, subscription_tier: SubscriptionTier):
+    # Only award points when referred user purchases PRO or ULTRA
+    if subscription_tier in [SubscriptionTier.PRO, SubscriptionTier.ULTRA]:
+        # Add referral record
+        create_referral(referrer_id, referred_id)
+        
+        # Award +1 IQ Point to referrer
+        add_iq_point(referrer_id)
+        
+        # Send notification to referrer
+        notify_referrer(referrer_id, referred_id, subscription_tier)
+```
+
+### Point Exchange Options
+- **1 IQ Point** → 25% discount on PRO or ULTRA subscription (1 month)
+- **2 IQ Points** → 50% discount on PRO or ULTRA subscription (1 month)
+- **3 IQ Points** → 1 month PRO subscription free
+- **4 IQ Points** → 1 month ULTRA subscription free
+- **5 IQ Points** → Lifetime access to closed channel "IQ Radar"
+
+### Constraints
+- User can only be referred once (`referred_id` is unique in Referrals)
+- Cannot refer yourself
+- Points are awarded only when referred user purchases PRO or ULTRA subscription
+- Points never expire
+- Points can be exchanged multiple times (if user has enough points)
+
+## Payment Processing (Tribute.tg)
+
+### Products
+- **PRO**: 30000 kopecks (300 RUB) / 30 days
+- **ULTRA**: 60000 kopecks (600 RUB) / 30 days
+
+### Payment Flow
+1. User clicks "Buy PRO" or "Buy ULTRA"
+2. `PaymentService.create_payment_link()`:
+   - Create Payment record with status=PENDING
+   - Call Tribute API to generate payment URL
+   - Return URL to user
+3. User completes payment on Tribute.tg
+4. Tribute sends webhook to `/api/webhooks/tribute`
+5. Verify HMAC signature
+6. `PaymentService.complete_payment()`:
+   - Update Payment status=COMPLETED
+   - Set completed_at timestamp
+7. `UserService.activate_subscription()`:
+   - Update user's subscription_tier
+   - Set subscription_expires_at
+   - Update limits
+8. Send confirmation message to user
+
+### Signature Verification
+```python
+import hmac
+import hashlib
+
+def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
+    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+```
+
+### Webhook Events
+- `payment.succeeded` → Activate subscription
+- `payment.failed` → Log error, notify user
+- `payment.refunded` → Deactivate subscription, update Payment status
+
+## CSV Analysis
+
+### Validation Rules
+1. **File Format**: Must be `.csv`
+2. **Required Columns**:
+   - `Date`
+   - `Asset ID`
+   - `Title`
+   - `Type` (Photo, Vector, Video, etc.)
+   - `Impressions`
+   - `Downloads` or `Sales`
+   - `Revenue`
+3. **Max Size**: 10 MB
+4. **Max Rows**: 50,000
+
+### Processing Logic
+1. Download file via Telegram Bot API
+2. Parse CSV using pandas
+3. Validate schema
+4. Calculate KPIs:
+   - **CPM** = (total_revenue / total_impressions) * 1000
+   - **Conversion Rate** = (total_sales / total_impressions) * 100
+   - **Average Check** = total_revenue / total_sales
+   - **Trend**: Compare with previous 30 days (if available)
+5. Group by asset type (photo, vector, video)
+6. Find top 5 performing assets
+7. Generate summary text
+8. Save to AnalyticsReport
+9. Notify user
+
+### KPI Definitions
+
+**CPM (Cost Per Mille)**:
+- Earnings per 1000 impressions
+- Good: > $10, Average: $5-10, Poor: < $5
+
+**Conversion Rate**:
+- Percentage of impressions that result in sales
+- Good: > 3%, Average: 1-3%, Poor: < 1%
+
+**Average Check**:
+- Average revenue per sale
+- Varies by asset type and license
+
+**Trend**:
+- `growing`: Revenue up > 10%
+- `stable`: Revenue change -10% to +10%
+- `declining`: Revenue down > 10%
+
+## Theme Generation
+
+### Categories
+1. **Vectors**: Flat design, icons, patterns, illustrations
+2. **Photos**: Lifestyle, business, nature, technology
+3. **Videos**: Time-lapses, b-roll, motion graphics
+4. **Audio**: Background music, sound effects, loops
+5. **Templates**: Presentations, social media, print
+
+### Generation Logic
+1. Select category
+2. Consider:
+   - Current trends (seasonal, holidays, events)
+   - User's past successful themes
+   - Market demand
+   - Niche opportunities
+3. Generate theme with:
+   - Title (concise, descriptive)
+   - Description (2-3 sentences)
+   - Relevance explanation (why now?)
+   - Suggested keywords (5-10 tags)
+4. Save to ThemeRequest
+5. Increment themes_used in Limits
+
+### Example Theme Output
+```python
+{
+    "category": "photos",
+    "theme": "Sustainable Living in Urban Spaces",
+    "description": "Photos of people using eco-friendly solutions in city environment. Focus on renewable energy, recycling, green transportation.",
+    "relevance": "Growing trend towards conscious consumption and climate awareness. High demand for authentic sustainability content.",
+    "keywords": ["sustainable", "eco-friendly", "urban", "green living", "renewable energy", "recycling", "conscious", "environment"]
+}
+```
+
+## Channel Subscription
+
+### Requirement
+All users MUST be subscribed to official channel before using bot.
+
+### Check Logic
+```python
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+```
+
+### Enforcement
+- Applied via middleware to ALL handlers
+- Exceptions: `/start` command (to show subscription message)
+- User sees: Channel link + "Check Subscription" button
+- After subscribing, click button to verify
+
+## Admin Panel
+
+### Access Control
+- Only users with `telegram_id` in `ADMIN_IDS` env variable
+- Admin panel URL protected by Basic Auth or JWT
+
+### Capabilities
+1. **User Management**:
+   - View all users
+   - Search by username/telegram_id
+   - Ban/unban users
+   - Manually extend subscriptions
+   - View user details (stats, limits, referrals)
+
+2. **Analytics**:
+   - Total analyses count
+   - Success/failure rates
+   - Average KPIs
+   - Top users by usage
+
+3. **Payments**:
+   - Payment history
+   - Total revenue
+   - Revenue by tier
+   - Refund processing
+
+4. **Broadcasts**:
+   - Create message
+   - Target specific subscription tier or all users
+   - Track delivery status
+   - View sent/error counts
+
+5. **Referrals**:
+   - Total referrals
+   - Breakdown by level
+   - Top referrers
+   - Conversion rates
+
+## Broadcast System
+
+### Creation
+1. Admin writes message text (supports HTML)
+2. Optionally select target: FREE, PRO, ULTRA, or ALL
+3. System creates BroadcastMessage with status=DRAFT
+4. Admin confirms
+
+### Execution
+1. Status changes to IN_PROGRESS
+2. ARQ worker fetches all target users
+3. Sends message to each user sequentially
+4. Tracks:
+   - `sent_count` (successful sends)
+   - `error_count` (failures)
+5. On completion: status=COMPLETED
+
+### Error Handling
+- If user blocked bot: skip silently
+- If telegram error: log and continue
+- If > 50% fail: status=FAILED, alert admin
+
+## Subscription Expiration
+
+### Checking
+- Run daily via ARQ cron job
+- Query users where `subscription_expires_at < now()` AND `subscription_tier != FREE`
+
+### Actions
+1. Downgrade to FREE tier
+2. Reset limits to FREE (analytics=5, themes=10)
+3. Send notification:
+   ```
+   ⚠️ Ваша подписка истекла
+   
+   Вы переведены на FREE тариф.
+   Продлите подписку для восстановления PRO/ULTRA функций.
+   ```
+
+## Banned Users
+
+### Enforcement
+- Check `is_banned` flag before any action
+- If banned:
+  ```
+  🚫 Доступ заблокирован
+  
+  Ваш аккаунт заблокирован за нарушение правил.
+  Для разблокировки обратитесь в поддержку: @support
+  ```
+
+### Ban Reasons
+- Terms of service violation
+- Abuse of bot features
+- Fraudulent activity
+- Manual admin decision
+
+### Unbanning
+- Only via admin panel
+- Admin clicks "Unban User"
+- Sets `is_banned=False`
+- User can immediately use bot again

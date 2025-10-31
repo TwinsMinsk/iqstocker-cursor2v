@@ -1,0 +1,156 @@
+# Testing Guide - IQStocker v2.0
+
+## General Testing Principles
+
+### Coverage Requirements
+- Minimum coverage: 80%
+- Critical paths: 95%+
+- Handlers: 70%+ (UI logic)
+- Services: 90%+ (business logic)
+- Repositories: 95%+ (CRUD operations)
+
+### Test Pyramid
+```
+    E2E Tests (5%)
+   ────────────
+  Integration (25%)
+ ────────────────────
+Unit Tests (70%)
+```
+
+## Pytest Configuration
+
+### pyproject.toml settings
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+addopts = [
+    "--strict-markers",
+    "--cov=src",
+    "--cov-report=html",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=80",
+]
+```
+
+### Test Structure
+```
+tests/
+├── conftest.py              # Common fixtures
+├── unit/
+│   ├── test_services.py     # Service tests
+│   ├── test_repositories.py # Repository tests
+│   └── test_models.py       # Model tests
+├── integration/
+│   ├── test_bot_flow.py     # Telegram flow
+│   └── test_api.py          # Admin API
+└── fixtures/
+    ├── csv_samples.py       # CSV test data
+    └── user_data.py         # User fixtures
+```
+
+## Async Testing Patterns
+
+### 1. Async Test Example
+```python
+import pytest
+from sqlmodel import Session, select
+
+@pytest.mark.asyncio
+async def test_user_repository_create(
+    db_session: Session,
+    user_repo: UserRepository
+):
+    # Arrange
+    user_data = UserCreate(
+        telegram_id=12345,
+        username="testuser",
+        subscription_type=SubscriptionType.FREE
+    )
+    
+    # Act
+    user = await user_repo.create(user_data)
+    
+    # Assert
+    assert user.telegram_id == 12345
+    assert user.subscription_type == SubscriptionType.FREE
+    assert user.id is not None
+```
+
+### 2. Service Layer Test with Mocks
+```python
+from unittest.mock import AsyncMock, patch
+
+@pytest.mark.asyncio
+async def test_subscription_service_upgrade(
+    subscription_service: SubscriptionService,
+    mock_user_repo: AsyncMock
+):
+    # Arrange
+    user = User(
+        id=1,
+        telegram_id=12345,
+        subscription_type=SubscriptionType.FREE
+    )
+    mock_user_repo.get_by_telegram_id.return_value = user
+    
+    # Act
+    result = await subscription_service.upgrade_to_pro(
+        telegram_id=12345,
+        days=30
+    )
+    
+    # Assert
+    assert result.subscription_type == SubscriptionType.PRO
+    assert result.subscription_end > datetime.utcnow()
+    mock_user_repo.update.assert_called_once()
+```
+
+## Key Testing Rules
+
+1. **Always use AAA pattern**: Arrange, Act, Assert
+2. **One test = one check**: don't mix different scenarios
+3. **Mock external dependencies**: Telegram API, Redis, external APIs
+4. **Use async fixtures**: for async code
+5. **Test edge cases**: empty data, large volumes, errors
+6. **Test errors**: not just happy path
+7. **Cleanup after tests**: use yield in fixtures
+8. **Don't test implementation**: test behavior
+
+## Running Tests
+
+### Local
+```bash
+# All tests
+pytest
+
+# With coverage
+pytest --cov=src --cov-report=html
+
+# Only unit
+pytest tests/unit/
+
+# Specific file
+pytest tests/unit/test_services.py
+
+# Specific test
+pytest tests/unit/test_services.py::test_user_service_create
+
+# Verbose
+pytest -v -s
+```
+
+### CI/CD
+```yaml
+# .github/workflows/tests.yml
+- name: Run tests
+  run: |
+    poetry run pytest --cov=src --cov-report=xml
+    
+- name: Upload coverage
+  uses: codecov/codecov-action@v3
+  with:
+    file: ./coverage.xml
+```
