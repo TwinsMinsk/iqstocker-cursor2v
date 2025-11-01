@@ -22,5 +22,5 @@ RUN poetry config virtualenvs.create false \
 # Copy application code
 COPY . .
 
-# Start ARQ worker
-CMD arq src.workers.main.WorkerSettings
+# Run migrations and start worker
+CMD poetry run alembic upgrade head && poetry run arq src.workers.main.WorkerSettings

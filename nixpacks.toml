@@ -1,0 +1,12 @@
+[phases.setup]
+nixPkgs = ["python311", "poetry"]
+
+[phases.install]
+cmds = [
+  "poetry config virtualenvs.create false",
+  "poetry install --without dev --no-interaction --no-ansi"
+]
+
+[start]
+cmd = "poetry run alembic upgrade head && python -m src.bot.main"
+

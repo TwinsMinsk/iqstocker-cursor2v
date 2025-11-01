@@ -4,6 +4,7 @@ version = "2.0.0"
 description = "Adobe Stock analytics bot - Telegram bot for stock photographers"
 authors = ["IQStocker Team"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -12,6 +13,7 @@ fastapi = "^0.109.2"
 uvicorn = {extras = ["standard"], version = "^0.27.1"}
 sqlmodel = "^0.0.16"
 asyncpg = "^0.29.0"
+psycopg2-binary = "^2.9.9"
 redis = "^5.0.1"
 arq = "^0.26.0"
 pydantic-settings = "^2.2.1"
@@ -47,6 +49,12 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+addopts = "-v --tb=short"
+
+[tool.poetry.scripts]
+bot = "src.bot.main:main"
+admin = "src.admin.main:app"
+worker = "src.workers.main:WorkerSettings"
 
 [build-system]
 requires = ["poetry-core"]

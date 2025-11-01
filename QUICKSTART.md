@@ -1,74 +1,220 @@
-# IQStocker v2.0 - Quick Start Guide
+# Quick Start Guide - IQStocker v2.0
 
-## Prerequisites
+## 🚀 Быстрый старт
+
+### Предварительные требования
+
 - Python 3.11+
 - Poetry
-- Docker & Docker Compose
-- PostgreSQL (via Docker)
-- Redis (via Docker)
+- Docker и Docker Compose
+- PostgreSQL 16
+- Redis 7.2
 
-## Installation
+### 1. Клонирование проекта
 
-### 1. Clone & Setup (5 commands)
 ```bash
+git clone <repository-url>
 cd iqstocker-v2
-poetry install
-cp .env.example .env
-# Edit .env with your credentials
 ```
 
-### 2. Local Development
+### 2. Установка зависимостей
+
 ```bash
-# Start databases
-docker compose up -d postgres redis
+poetry install
+```
 
-# Apply migrations
+### 3. Настройка окружения
+
+Скопируйте `.env.example` в `.env` и заполните значения:
+
+```bash
+cp .env.example .env
+```
+
+Обязательные переменные:
+- `BOT_TOKEN` - токен Telegram бота
+- `CHANNEL_ID` - ID канала для подписки
+- `ADMIN_IDS` - список ID администраторов (через запятую)
+- `DATABASE_URL` - URL подключения к PostgreSQL
+- `ADMIN_USERNAME` - логин для админ-панели
+- `ADMIN_PASSWORD` - пароль для админ-панели
+- `SECRET_KEY` - секретный ключ (сгенерируйте: `python -c "import secrets; print(secrets.token_urlsafe(32))"`)
+
+### 4. Запуск с Docker Compose
+
+```bash
+docker compose up -d
+```
+
+Это запустит:
+- PostgreSQL (порт 5432)
+- Redis (порт 6379)
+- Bot service
+- Admin service (порт 8000)
+- Worker service
+
+### 5. Применение миграций
+
+```bash
 poetry run alembic upgrade head
+```
 
-# Run bot
+Или через Docker:
+```bash
+docker compose exec bot poetry run alembic upgrade head
+```
+
+### 6. Загрузка тем из CSV
+
+```bash
+poetry run python scripts/load_themes.py
+```
+
+### 7. Проверка работы
+
+- Bot: Проверьте логи `docker compose logs bot`
+- Admin: Откройте http://localhost:8000
+- Worker: Проверьте логи `docker compose logs worker`
+
+## 🔧 Разработка
+
+### Запуск бота локально
+
+```bash
 poetry run python -m src.bot.main
 ```
 
-### 3. Testing
+### Запуск админ-панели локально
+
 ```bash
-poetry run pytest
-poetry run mypy src/
-poetry run ruff check src/
+poetry run uvicorn src.admin.main:app --reload
 ```
 
-### 4. Deploy to Railway
-1. Connect GitHub repository
-2. Create PostgreSQL and Redis services
-3. Set ENV variables
-4. Deploy via Git Push
+### Запуск worker локально
 
-## Project Structure
-- `src/bot/` - Telegram bot handlers
-- `src/admin/` - FastAPI admin panel
-- `src/database/` - Models & repositories
-- `src/services/` - Business logic
-- `src/workers/` - Background tasks
-
-## Key Files
-- `tid_v2.md` - Technical specification
-- `AGENT_PLAN.md` - Implementation plan
-- `lexicon_ru.py` - All bot texts
-
-## Useful Commands
 ```bash
-# Development
-poetry install
+poetry run arq src.workers.main.WorkerSettings
+```
+
+### Тестирование
+
+```bash
 poetry run pytest
+```
 
-# Database
-poetry run alembic revision --autogenerate -m "Message"
+### Линтинг
+
+```bash
+poetry run ruff check src/
+poetry run ruff format src/
+```
+
+### Проверка типов
+
+```bash
+poetry run mypy src/
+```
+
+## 📝 Миграции
+
+### Создание миграции
+
+```bash
+poetry run alembic revision --autogenerate -m "Описание изменений"
+```
+
+### Применение миграций
+
+```bash
 poetry run alembic upgrade head
+```
 
-# Docker
+### Откат миграции
+
+```bash
+poetry run alembic downgrade -1
+```
+
+## 🐳 Docker команды
+
+### Запуск всех сервисов
+
+```bash
 docker compose up -d
+```
+
+### Просмотр логов
+
+```bash
 docker compose logs -f bot
+docker compose logs -f admin
+docker compose logs -f worker
+```
+
+### Остановка
+
+```bash
 docker compose down
 ```
 
-## Support
-Refer to tid_v2.md for detailed documentation.
+### Пересборка
+
+```bash
+docker compose up -d --build
+```
+
+### Выполнение команд в контейнере
+
+```bash
+docker compose exec bot poetry run alembic upgrade head
+docker compose exec admin poetry run python scripts/load_themes.py
+```
+
+## 📊 Проверка статуса
+
+### Health checks
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/api/health
+```
+
+### Подключение к PostgreSQL
+
+```bash
+docker compose exec postgres psql -U iqstocker -d iqstocker
+```
+
+### Подключение к Redis
+
+```bash
+docker compose exec redis redis-cli
+```
+
+## 🆘 Troubleshooting
+
+### Проблемы с зависимостями
+
+```bash
+poetry install --no-dev
+```
+
+### Проблемы с миграциями
+
+```bash
+poetry run alembic current
+poetry run alembic history
+```
+
+### Очистка базы данных
+
+```bash
+docker compose exec postgres psql -U iqstocker -d iqstocker -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+poetry run alembic upgrade head
+```
+
+### Очистка Docker volumes
+
+```bash
+docker compose down -v
+```
