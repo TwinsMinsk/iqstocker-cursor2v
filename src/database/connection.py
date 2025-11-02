@@ -14,8 +14,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlmodel import SQLModel
+import structlog
 
 from src.config.settings import settings
+
+logger = structlog.get_logger(__name__)
 from src.database.models import (
     User,
     Limits,
@@ -33,36 +36,33 @@ from src.database.models import (
 # Это решает проблемы с "Network is unreachable"
 def get_supabase_url() -> str:
     """
-    Преобразует direct connection URL в pooler URL для Supabase
+    Возвращает правильный URL для подключения к Supabase
+    
+    КРИТИЧНО: Для Railway используем ПРЯМОЙ connection string (direct connection),
+    так как Railway поддерживает IPv6 и это работает стабильнее чем pooler.
+    
+    Pooler используется только если прямой connection не работает.
+    
     Direct: postgresql+asyncpg://postgres:password@db.project.supabase.co:5432/postgres
-    Pooler: postgresql+asyncpg://postgres.project:password@aws-0-region.pooler.supabase.com:6543/postgres
+    Pooler Session Mode: postgresql+asyncpg://postgres.project:password@aws-0-region.pooler.supabase.com:5432/postgres
+    
+    ВАЖНО: Для pooler формат username: postgres.PROJECT-REF (с точкой!)
     """
     url = settings.database.url
     
-    # Если это direct connection к Supabase, преобразуем в pooler URL
-    if "db." in url and ".supabase.co" in url and "pooler" not in url:
-        # Парсим текущий URL с помощью регулярного выражения
-        # Формат: postgresql+asyncpg://postgres:password@db.PROJECT-ID.supabase.co:PORT/postgres
-        match = re.match(r'(postgresql\+asyncpg://)postgres:([^@]+)@db\.([^.]+)\.supabase\.co:(\d+)/(.+)', url)
-        if match:
-            protocol, password_raw, project_id, port, database = match.groups()
-            
-            # Декодируем пароль, если он был закодирован, затем кодируем правильно
-            password = unquote(password_raw)
-            
-            # Определяем регион (для проекта zpotpummnbfdlnzibyqb это eu-north-1)
-            region_map = {
-                "zpotpummnbfdlnzibyqb": "eu-north-1",
-            }
-            region = region_map.get(project_id, "eu-north-1")  # По умолчанию eu-north-1
-            
-            # Кодируем пароль для использования в URL (безопасное экранирование)
-            password_encoded = quote(password, safe="")
-            
-            # Создаем pooler URL для transaction mode (порт 6543)
-            pooler_url = f"{protocol}postgres.{project_id}:{password_encoded}@aws-0-{region}.pooler.supabase.com:6543/{database}"
-            return pooler_url
+    # Логируем исходный URL (без пароля)
+    url_masked = re.sub(r':([^@]+)@', ':***@', url)
+    logger.info("database_url_processing", url_masked=url_masked)
     
+    # Если уже используется pooler URL, возвращаем как есть
+    if "pooler.supabase.com" in url:
+        logger.info("database_url_pooler_detected")
+        return url
+    
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем ПРЯМОЙ connection string для Railway
+    # Railway поддерживает IPv6, поэтому прямой connection должен работать
+    # Это решает проблему "Tenant or user not found" с pooler
+    logger.info("database_url_using_direct", reason="Railway supports IPv6, using direct connection")
     return url
 
 engine = create_async_engine(
